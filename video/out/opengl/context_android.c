@@ -34,6 +34,31 @@
 #include "video/mp_image.h"
 #include "video/out/gpu/video.h"
 
+// The start of the platform's ANativeWindow, up to perform(), as AOSP's
+// system/window.h declares it. The NDK keeps the type opaque.
+struct native_window_head {
+    int magic;
+    int version;
+    void *reserved[4];
+    void (*inc_ref)(void *base);
+    void (*dec_ref)(void *base);
+    uint32_t flags;
+    int min_swap_interval;
+    int max_swap_interval;
+    float xdpi;
+    float ydpi;
+    intptr_t oem[4];
+    void *set_swap_interval;
+    void *dequeue_buffer_deprecated;
+    void *lock_buffer_deprecated;
+    void *queue_buffer_deprecated;
+    int (*query)(const void *window, int what, int *value);
+    int (*perform)(void *window, int operation, ...);
+};
+
+#define NATIVE_WINDOW_MAGIC 0x5f776e64 // '_wnd'
+#define NATIVE_WINDOW_SET_BUFFERS_DATASPACE 19
+
 struct color_request {
     bool has_color; // false if nothing asks for a color space
     enum pl_color_primaries primaries;
@@ -131,6 +156,23 @@ static bool set_data_space(struct ra_ctx *ctx, int32_t data_space,
     int32_t ret = p->set_buffers_data_space(window, data_space);
     MP_VERBOSE(ctx, "HDR10: ANativeWindow_setBuffersDataSpace(%s = 0x%x) "
                "returned %d\n", name, (unsigned)data_space, (int)ret);
+    if (ret == 0)
+        return true;
+
+    // Android 10 and 11 refuse ADATASPACE_BT2020_PQ from every app: the
+    // function first asks the compositor for the display's HDR capabilities,
+    // which takes a permission only system apps hold. The window's own
+    // operation has no such check.
+    struct native_window_head *head = (struct native_window_head *)window;
+    if (head->magic != NATIVE_WINDOW_MAGIC || !head->perform) {
+        MP_VERBOSE(ctx, "HDR10: the window is not the platform's ANativeWindow "
+                   "(magic 0x%x)\n", (unsigned)head->magic);
+        return false;
+    }
+    ret = head->perform(window, NATIVE_WINDOW_SET_BUFFERS_DATASPACE,
+                        (int)data_space);
+    MP_VERBOSE(ctx, "HDR10: ANativeWindow perform(SET_BUFFERS_DATASPACE, "
+               "%s = 0x%x) returned %d\n", name, (unsigned)data_space, (int)ret);
     return ret == 0;
 }
 
